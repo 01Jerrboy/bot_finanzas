@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 import urllib.parse
 
-# 1. Configuración de la interfaz
+# 1. Configuración de página
 st.set_page_config(
     page_title="Control Financiero Personal",
     page_icon="💳",
@@ -16,7 +16,7 @@ st.set_page_config(
 
 load_dotenv()
 
-# 2. Conexión segura a Supabase (compatible con local y Streamlit Cloud Secrets)
+# 2. Conexión a Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL") or st.secrets.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY") or st.secrets.get("SUPABASE_KEY", "")
 
@@ -30,9 +30,9 @@ supabase = get_supabase_client()
 def load_contacts():
     try:
         res = supabase.table("contacts").select("*").order("name").execute()
-        return pd.DataFrame(res.data) if res.data else pd.DataFrame(columns=["id", "name"])
+        return pd.DataFrame(res.data) if res.data else pd.DataFrame(columns=["id", "name", "phone"])
     except Exception:
-        return pd.DataFrame(columns=["id", "name"])
+        return pd.DataFrame(columns=["id", "name", "phone"])
 
 def load_transactions():
     try:
@@ -50,7 +50,7 @@ def load_transactions():
                 "tipo": row.get("type"),
                 "descripcion": row.get("description"),
                 "monto": float(row.get("amount", 0)),
-                "cuotas": row.get("installments", 1),
+                "cuotas": int(row.get("installments", 1)),
                 "estado": row.get("status", "PENDIENTE"),
                 "contacto_id": row.get("contact_id"),
                 "persona": contact_info.get("name", "Personal"),
@@ -60,7 +60,7 @@ def load_transactions():
     except Exception:
         return pd.DataFrame()
 
-# 4. Filtros y selección de fechas
+# 4. Filtros en la barra lateral
 st.sidebar.title("⚙️ Filtros y Opciones")
 
 df_contacts = load_contacts()
@@ -79,14 +79,16 @@ else:
     df_mes = pd.DataFrame()
 
 # 5. Pestañas de la aplicación
-tab_dashboard, tab_cobranzas, tab_contactos, tab_historial = st.tabs([
+tab_dashboard, tab_cobranzas, tab_contactos, tab_transacciones = st.tabs([
     "📊 Resumen del Mes", 
     "💳 Préstamos y Cobros", 
-    "👥 Gestión de Personas", 
-    "📝 Todas las Transacciones"
+    "👥 Gestión de Personas (CRUD)", 
+    "📝 Gestión de Transacciones (CRUD)"
 ])
 
-# --- PESTAÑA 1: RESUMEN DEL MES ---
+# ==========================================
+# 📊 PESTAÑA 1: RESUMEN DEL MES
+# ==========================================
 with tab_dashboard:
     st.header(f"Resumen Financiero — {mes_seleccionado}")
     
@@ -110,7 +112,9 @@ with tab_dashboard:
     else:
         st.info("No hay transacciones registradas para este mes.")
 
-# --- PESTAÑA 2: PRÉSTAMOS Y COBROS ---
+# ==========================================
+# 💳 PESTAÑA 2: PRÉSTAMOS Y COBROS
+# ==========================================
 with tab_cobranzas:
     st.header("Control de Deudas por Persona")
     
@@ -142,17 +146,20 @@ with tab_cobranzas:
                     c2.write(f"**S/ {r['monto']:,.2f}**")
                     if c3.button("Marcar Cobrado", key=f"cobrar_{r['id']}"):
                         supabase.table("transactions").update({"status": "COBRADO"}).eq("id", r["id"]).execute()
-                        st.toast("¡Registro actualizado como cobrado!")
+                        st.toast("¡Registro actualizado!")
                         st.rerun()
 
-# --- PESTAÑA 3: GESTIÓN DE PERSONAS ---
+# ==========================================
+# 👥 PESTAÑA 3: GESTIÓN DE PERSONAS (CRUD)
+# ==========================================
 with tab_contactos:
     st.header("Directorio de Contactos")
     
     col_form, col_list = st.columns([1, 2])
     
+    # CREATE: Formulario para agregar persona
     with col_form:
-        st.subheader("➕ Agregar Persona")
+        st.subheader("➕ Nueva Persona")
         with st.form("form_nuevo_contacto", clear_on_submit=True):
             nuevo_nombre = st.text_input("Nombre / Apodo *")
             nuevo_telefono = st.text_input("Teléfono (Ej: 51987654321)")
@@ -160,27 +167,155 @@ with tab_contactos:
             
             if submitted:
                 if nuevo_nombre.strip():
-                    payload = {"name": nuevo_nombre.strip()}
-                    if nuevo_telefono.strip():
-                        payload["phone"] = nuevo_telefono.strip()
-                    supabase.table("contacts").insert(payload).execute()
-                    st.success(f"Persona '{nuevo_nombre}' registrada.")
-                    st.rerun()
+                    try:
+                        payload = {"name": nuevo_nombre.strip()}
+                        if nuevo_telefono.strip():
+                            payload["phone"] = nuevo_telefono.strip()
+                        supabase.table("contacts").insert(payload).execute()
+                        st.toast(f"Persona '{nuevo_nombre}' creada con éxito.")
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Error al guardar: {err}")
                 else:
-                    st.error("El nombre es obligatorio.")
+                    st.warning("El nombre es obligatorio.")
                     
+    # READ, UPDATE, DELETE: Lista editable de personas
     with col_list:
-        st.subheader("Personas Registradas")
+        st.subheader("Directorio Registrado")
         if not df_contacts.empty:
-            cols_disponibles = [c for c in ["name", "phone", "id"] if c in df_contacts.columns]
-            st.dataframe(df_contacts[cols_disponibles], use_container_width=True, hide_index=True)
+            for _, c in df_contacts.iterrows():
+                tel_val = c.get("phone") if pd.notna(c.get("phone")) and c.get("phone") else ""
+                tel_display = f"📞 {tel_val}" if tel_val else "Sin teléfono"
+                
+                with st.expander(f"👤 {c['name']} ({tel_display})"):
+                    # Formulario de edición (UPDATE)
+                    with st.form(f"edit_contact_{c['id']}"):
+                        edit_name = st.text_input("Nombre", value=c["name"])
+                        edit_phone = st.text_input("Teléfono", value=tel_val)
+                        
+                        btn_update = st.form_submit_button("💾 Guardar Cambios")
+                        if btn_update:
+                            try:
+                                supabase.table("contacts").update({
+                                    "name": edit_name.strip(),
+                                    "phone": edit_phone.strip() if edit_phone.strip() else None
+                                }).eq("id", c["id"]).execute()
+                                st.toast("Contacto actualizado.")
+                                st.rerun()
+                            except Exception as err:
+                                st.error(f"Error al actualizar: {err}")
+                    
+                    # Botón de eliminación (DELETE)
+                    if st.button("🗑️ Eliminar Contacto", key=f"del_c_{c['id']}", type="secondary"):
+                        try:
+                            # Desvincular transacciones previas
+                            supabase.table("transactions").update({"contact_id": None}).eq("contact_id", c["id"]).execute()
+                            # Eliminar contacto
+                            supabase.table("contacts").delete().eq("id", c["id"]).execute()
+                            st.toast(f"'{c['name']}' eliminado correctamente.")
+                            st.rerun()
+                        except Exception as err:
+                            st.error(f"Error al eliminar: {err}")
         else:
             st.info("No hay contactos en la lista.")
 
-# --- PESTAÑA 4: HISTORIAL COMPLETO ---
-with tab_historial:
-    st.header("Historial Completo de Transacciones")
+# ==========================================
+# 📝 PESTAÑA 4: GESTIÓN DE TRANSACCIONES (CRUD)
+# ==========================================
+with tab_transacciones:
+    st.header("Gestión de Transacciones")
+    
+    # CREATE: Nueva transacción manual
+    with st.expander("➕ Registrar Nueva Transacción Manual"):
+        with st.form("form_nueva_tx", clear_on_submit=True):
+            f_col1, f_col2, f_col3 = st.columns(3)
+            nueva_fecha = f_col1.date_input("Fecha", value=datetime.today())
+            nueva_desc = f_col2.text_input("Descripción * (Ej: Almuerzo chifa)")
+            nuevo_monto = f_col3.number_input("Monto (S/) *", min_value=0.1, step=0.5)
+            
+            f_col4, f_col5, f_col6 = st.columns(3)
+            nuevo_tipo = f_col4.selectbox("Tipo", ["GASTO_PROPIO", "PRESTAMO_TERCERO"])
+            
+            # Selector de contacto
+            contact_options = {"(Ninguno / Personal)": None}
+            if not df_contacts.empty:
+                for _, row_c in df_contacts.iterrows():
+                    contact_options[row_c["name"]] = row_c["id"]
+            
+            contacto_seleccionado = f_col5.selectbox("Asignar a Persona", list(contact_options.keys()))
+            nuevo_estado = f_col6.selectbox("Estado", ["PENDIENTE", "COBRADO"])
+            
+            nuevo_mes = f_col4.text_input("Mes Contable (YYYY-MM)", value=datetime.today().strftime("%Y-%m"))
+            nuevas_cuotas = f_col5.number_input("Cuotas", min_value=1, value=1)
+            
+            submitted_tx = st.form_submit_button("Registrar Transacción")
+            if submitted_tx:
+                if nueva_desc.strip() and nuevo_monto > 0:
+                    try:
+                        tx_payload = {
+                            "transaction_date": str(nueva_fecha),
+                            "billing_month": nuevo_mes.strip(),
+                            "type": nuevo_tipo,
+                            "description": nueva_desc.strip(),
+                            "amount": float(nuevo_monto),
+                            "installments": int(nuevas_cuotas),
+                            "status": nuevo_estado,
+                            "contact_id": contact_options[contacto_seleccionado]
+                        }
+                        supabase.table("transactions").insert(tx_payload).execute()
+                        st.toast("Transacción guardada.")
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Error al registrar: {err}")
+                else:
+                    st.warning("Completa la descripción y el monto.")
+    
+    st.divider()
+    
+    # READ, UPDATE, DELETE: Lista de transacciones
+    st.subheader("Historial y Edición de Registros")
     if not df_tx.empty:
-        st.dataframe(df_tx, use_container_width=True, hide_index=True)
+        for _, tx in df_tx.iterrows():
+            with st.expander(f"📅 {tx['fecha']} | {tx['descripcion']} — S/ {tx['monto']:,.2f} ({tx['persona']} - {tx['estado']})"):
+                with st.form(f"edit_tx_{tx['id']}"):
+                    e1, e2, e3 = st.columns(3)
+                    e_desc = e1.text_input("Descripción", value=tx["descripcion"])
+                    e_monto = e2.number_input("Monto (S/)", value=float(tx["monto"]), step=0.5)
+                    e_tipo = e3.selectbox("Tipo", ["GASTO_PROPIO", "PRESTAMO_TERCERO"], index=0 if tx["tipo"] == "GASTO_PROPIO" else 1)
+                    
+                    e4, e5, e6 = st.columns(3)
+                    e_mes = e4.text_input("Mes Contable", value=tx["mes"])
+                    e_estado = e5.selectbox("Estado", ["PENDIENTE", "COBRADO"], index=0 if tx["estado"] == "PENDIENTE" else 1)
+                    
+                    # Persona asignada
+                    current_idx = 0
+                    if tx["persona"] in list(contact_options.keys()):
+                        current_idx = list(contact_options.keys()).index(tx["persona"])
+                    e_persona = e6.selectbox("Persona", list(contact_options.keys()), index=current_idx)
+                    
+                    btn_save_tx = st.form_submit_button("💾 Guardar Cambios en Transacción")
+                    if btn_save_tx:
+                        try:
+                            supabase.table("transactions").update({
+                                "description": e_desc.strip(),
+                                "amount": float(e_monto),
+                                "type": e_tipo,
+                                "billing_month": e_mes.strip(),
+                                "status": e_estado,
+                                "contact_id": contact_options[e_persona]
+                            }).eq("id", tx["id"]).execute()
+                            st.toast("Transacción actualizada.")
+                            st.rerun()
+                        except Exception as err:
+                            st.error(f"Error al actualizar: {err}")
+                
+                # DELETE Transacción
+                if st.button("🗑️ Eliminar Transacción", key=f"del_tx_{tx['id']}", type="secondary"):
+                    try:
+                        supabase.table("transactions").delete().eq("id", tx["id"]).execute()
+                        st.toast("Transacción eliminada.")
+                        st.rerun()
+                    except Exception as err:
+                        st.error(f"Error al eliminar: {err}")
     else:
         st.info("No hay transacciones registradas.")
