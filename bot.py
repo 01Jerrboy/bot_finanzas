@@ -1,6 +1,9 @@
 import os
 import json
+import asyncio
 from datetime import datetime
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
@@ -9,6 +12,21 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 from typing import Optional
+
+# Mini servidor HTTP para satisfacer el escaneo de puertos de Render
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running 24/7!")
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
+
+# Iniciar servidor web en un hilo secundario
+Thread(target=run_health_server, daemon=True).start()
 
 # Cargar variables de entorno
 load_dotenv()
@@ -23,7 +41,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Esquema estructurado para la IA
+# Esquema para la IA
 class FinancialEntry(BaseModel):
     tipo: str = Field(description="Uno de: 'GASTO_PROPIO', 'PRESTAMO_TERCERO', 'PAGO_RECIBIDO'")
     persona: Optional[str] = Field(default=None, description="Nombre de la persona involucrada si aplica (ej. Elsa, Alejandro, Jesús), o null si es gasto propio")
@@ -65,12 +83,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_chat_action("typing")
 
     try:
-        # 1. Obtener la fecha y mes actual del sistema
         now = datetime.now()
         current_date_str = now.strftime("%Y-%m-%d")
         current_month_str = now.strftime("%Y-%m")
 
-        # 2. Procesar el texto con Gemini
         response = ai_client.models.generate_content(
             model='gemini-3.6-flash',
             contents=user_text,
@@ -83,11 +99,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         data = json.loads(response.text)
-
-        # Determinar el mes de facturación (si no lo especificó, usa el actual)
         billing_month = data.get("mes_facturacion") or current_month_str
         
-        # 3. Armar registro para Supabase
         db_payload = {
             "type": data.get("tipo"),
             "description": data.get("descripcion"),
@@ -99,16 +112,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "status": "COBRADO" if data.get("tipo") == "PAGO_RECIBIDO" else "PENDIENTE"
         }
         
-        # Vincular contacto si existe
         if data.get("persona"):
             contact_res = supabase.table("contacts").select("id").ilike("name", f"%{data['persona']}%").execute()
             if contact_res.data:
                 db_payload["contact_id"] = contact_res.data[0]["id"]
 
-        # Insertar en Supabase
         supabase.table("transactions").insert(db_payload).execute()
 
-        # 4. Mensaje de confirmación formateado
         tipo_str = {
             "PRESTAMO_TERCERO": "💳 <b>Préstamo de Tarjeta (Por Cobrar)</b>",
             "GASTO_PROPIO": "🛒 <b>Gasto Propio</b>",
